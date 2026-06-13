@@ -27,15 +27,30 @@ class DopplerApp(tk.Tk):
     def __init__(self) -> None:
         self._setup_dpi_awareness()
         super().__init__()
+        self.colors = {
+            "page_bg": "#E9E0D3",
+            "panel": "#F6F1E7",
+            "panel_alt": "#E1D2BF",
+            "ink": "#2D2823",
+            "muted": "#756B5B",
+            "accent": "#C76632",
+            "accent_dark": "#99451D",
+            "accent_soft": "#E9B07D",
+            "shadow": "#D4C4B0",
+            "line": "#D8CEBD",
+            "deep": "#3C342C",
+        }
         self.title("运动目标多普勒测速软件")
         self.geometry("1460x920")
         self.minsize(1260, 780)
-        self.configure(bg="#F4F1EA")
+        self.configure(bg=self.colors["page_bg"])
 
         self.current_signal: SignalData | None = None
         self.current_result: AnalysisResult | None = None
         self.project_root = Path(__file__).resolve().parent.parent
         self.analysis_in_progress = False
+        self._syncing_views = False
+        self._table_row_count = 0
 
         self._build_style()
         self._build_variables()
@@ -54,16 +69,22 @@ class DopplerApp(tk.Tk):
     def _build_style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure(".", background="#F4F1EA", foreground="#24313A", font=("Segoe UI", 10))
-        style.configure("Panel.TFrame", background="#FCFAF5")
-        style.configure("Header.TLabel", font=("Segoe UI Semibold", 12), background="#FCFAF5")
-        style.configure("Section.TLabel", font=("Segoe UI Semibold", 10), background="#FCFAF5", foreground="#4A5861")
+        style.configure(".", background=self.colors["page_bg"], foreground=self.colors["ink"], font=("Segoe UI", 10))
+        style.configure("Shell.TFrame", background=self.colors["page_bg"])
+        style.configure("Panel.TFrame", background=self.colors["panel"])
+        style.configure("PanelAlt.TFrame", background=self.colors["panel_alt"])
+        style.configure("Header.TLabel", font=("Georgia", 13, "bold"), background=self.colors["panel"], foreground=self.colors["ink"])
+        style.configure("Section.TLabel", font=("Segoe UI Semibold", 10), background=self.colors["panel"], foreground=self.colors["muted"])
         style.configure("Data.Treeview", rowheight=28, font=("Segoe UI", 10))
         style.configure("Data.Treeview.Heading", font=("Segoe UI Semibold", 10))
-        style.configure("Accent.TButton", background="#C96A2A", foreground="white", padding=(10, 7))
-        style.map("Accent.TButton", background=[("active", "#B45E24")])
-        style.configure("Nav.TNotebook", background="#FCFAF5", borderwidth=0)
-        style.configure("Nav.TNotebook.Tab", padding=(16, 8), font=("Segoe UI Semibold", 10))
+        style.configure("Data.Treeview", background="#FBF7F0", fieldbackground="#FBF7F0", foreground=self.colors["ink"], bordercolor=self.colors["line"])
+        style.configure("Accent.TButton", background=self.colors["accent"], foreground="white", padding=(12, 8), borderwidth=0, font=("Segoe UI Semibold", 10))
+        style.map("Accent.TButton", background=[("active", self.colors["accent_dark"])])
+        style.configure("Soft.TButton", background=self.colors["panel_alt"], foreground=self.colors["ink"], padding=(12, 8), borderwidth=0)
+        style.map("Soft.TButton", background=[("active", "#D7C5AD")])
+        style.configure("Nav.TNotebook", background=self.colors["panel"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("Nav.TNotebook.Tab", padding=(18, 10), font=("Segoe UI Semibold", 10), background="#E9DDCB", foreground=self.colors["muted"], borderwidth=0)
+        style.map("Nav.TNotebook.Tab", background=[("selected", self.colors["accent"])], foreground=[("selected", "white")])
 
     def _build_variables(self) -> None:
         self.sample_rate_var = tk.StringVar(value="24000")
@@ -87,15 +108,18 @@ class DopplerApp(tk.Tk):
         self.summary_average_speed_var = tk.StringVar(value="--")
         self.summary_last_speed_var = tk.StringVar(value="--")
         self.summary_freq_var = tk.StringVar(value="--")
+        self.status_var = tk.StringVar(value="待命")
 
     def _build_layout(self) -> None:
-        shell = ttk.Frame(self, padding=14)
+        shell = ttk.Frame(self, padding=14, style="Shell.TFrame")
         shell.pack(fill="both", expand=True)
 
-        title_bar = ttk.Frame(shell, style="Panel.TFrame", padding=14)
+        title_bar = ttk.Frame(shell, style="Panel.TFrame", padding=18)
         title_bar.pack(fill="x", pady=(0, 12))
-        tk.Label(title_bar, text="运动目标多普勒测速软件", bg="#FCFAF5", fg="#24313A", font=("Segoe UI Semibold", 18)).pack(anchor="w")
-        tk.Label(title_bar, text="多工况仿真、频谱测频、速度计算与结果导出", bg="#FCFAF5", fg="#6A747C", font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
+        badge = tk.Label(title_bar, text="DOPPLER CONSOLE", bg=self.colors["deep"], fg="#F6E9D7", font=("Consolas", 9, "bold"), padx=10, pady=4)
+        badge.pack(anchor="w")
+        tk.Label(title_bar, text="运动目标多普勒测速软件", bg=self.colors["panel"], fg=self.colors["ink"], font=("Georgia", 22, "bold")).pack(anchor="w", pady=(10, 0))
+        tk.Label(title_bar, text="暖色工业仪表台风格，多工况仿真、频谱测频、速度计算与结果导出", bg=self.colors["panel"], fg=self.colors["muted"], font=("Segoe UI", 10)).pack(anchor="w", pady=(6, 0))
 
         main = ttk.Panedwindow(shell, orient="horizontal")
         main.pack(fill="both", expand=True)
@@ -107,6 +131,18 @@ class DopplerApp(tk.Tk):
 
         self._build_left(left)
         self._build_right(right)
+
+        status_bar = ttk.Frame(shell, style="Panel.TFrame", padding=(14, 8))
+        status_bar.pack(fill="x", pady=(12, 0))
+        tk.Label(status_bar, text="状态", bg=self.colors["panel"], fg=self.colors["muted"], font=("Consolas", 8, "bold")).pack(side="left")
+        tk.Label(status_bar, textvariable=self.status_var, bg=self.colors["panel"], fg=self.colors["ink"], font=("Segoe UI Semibold", 10)).pack(side="left", padx=(10, 0))
+        tk.Label(
+            status_bar,
+            text="图表操作: 滚轮缩放 / 左键拖拽平移 / 双击复位 / 悬浮读数",
+            bg=self.colors["panel"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+        ).pack(side="right")
 
     def _build_left(self, parent: ttk.Frame) -> None:
         notebook = ttk.Notebook(parent, style="Nav.TNotebook")
@@ -120,6 +156,10 @@ class DopplerApp(tk.Tk):
         notebook.add(sim_tab, text="仿真工况")
         notebook.add(action_tab, text="操作导出")
 
+        intro = ttk.Frame(param_tab, style="PanelAlt.TFrame", padding=12)
+        intro.pack(fill="x", pady=(0, 12))
+        tk.Label(intro, text="参数控制台", bg=self.colors["panel_alt"], fg=self.colors["ink"], font=("Georgia", 14, "bold")).pack(anchor="w")
+        tk.Label(intro, text="调节采样率、载频和频率搜索范围，建立适合当前实验场景的测速基线。", bg=self.colors["panel_alt"], fg=self.colors["muted"], justify="left", wraplength=280).pack(anchor="w", pady=(6, 0))
         ttk.Label(param_tab, text="采集与处理配置", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
         for label, variable in [
             ("采样率 (Hz)", self.sample_rate_var),
@@ -133,6 +173,10 @@ class DopplerApp(tk.Tk):
         ]:
             self._add_entry(param_tab, label, variable)
 
+        sim_intro = ttk.Frame(sim_tab, style="PanelAlt.TFrame", padding=12)
+        sim_intro.pack(fill="x", pady=(0, 12))
+        tk.Label(sim_intro, text="运动工况实验台", bg=self.colors["panel_alt"], fg=self.colors["ink"], font=("Georgia", 14, "bold")).pack(anchor="w")
+        tk.Label(sim_intro, text="在匀速、加减速、分段轨迹和自定义曲线之间切换，快速构造测试样本。", bg=self.colors["panel_alt"], fg=self.colors["muted"], justify="left", wraplength=280).pack(anchor="w", pady=(6, 0))
         ttk.Label(sim_tab, text="运动模型选择", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
         ttk.Label(sim_tab, text="运动模式", style="Section.TLabel").pack(anchor="w")
         self.mode_combo = ttk.Combobox(sim_tab, values=[label for _, label in MOTION_MODES], state="readonly")
@@ -142,52 +186,99 @@ class DopplerApp(tk.Tk):
         self.mode_fields_frame = ttk.Frame(sim_tab, style="Panel.TFrame")
         self.mode_fields_frame.pack(fill="x")
 
+        action_intro = ttk.Frame(action_tab, style="PanelAlt.TFrame", padding=12)
+        action_intro.pack(fill="x", pady=(0, 12))
+        tk.Label(action_intro, text="执行与导出", bg=self.colors["panel_alt"], fg=self.colors["ink"], font=("Georgia", 14, "bold")).pack(anchor="w")
+        tk.Label(action_intro, text="从文件导入、生成仿真，到分析、导出明细，全链路在这里完成。", bg=self.colors["panel_alt"], fg=self.colors["muted"], justify="left", wraplength=280).pack(anchor="w", pady=(6, 0))
         ttk.Label(action_tab, text="操作面板", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
         ttk.Button(action_tab, text="导入信号文件", style="Accent.TButton", command=self.load_signal_file).pack(fill="x", pady=(0, 8))
-        ttk.Button(action_tab, text="载入示例信号", command=self.load_demo_signal).pack(fill="x", pady=(0, 8))
-        ttk.Button(action_tab, text="生成仿真信号", command=self.generate_signal).pack(fill="x", pady=(0, 8))
-        self.analyze_button = ttk.Button(action_tab, text="执行测速分析", command=self.run_analysis)
+        ttk.Button(action_tab, text="载入示例信号", style="Soft.TButton", command=self.load_demo_signal).pack(fill="x", pady=(0, 8))
+        ttk.Button(action_tab, text="生成仿真信号", style="Soft.TButton", command=self.generate_signal).pack(fill="x", pady=(0, 8))
+        self.analyze_button = ttk.Button(action_tab, text="执行测速分析", style="Accent.TButton", command=self.run_analysis)
         self.analyze_button.pack(fill="x", pady=(0, 8))
-        ttk.Button(action_tab, text="导出 CSV 结果", command=self.export_csv).pack(fill="x", pady=(0, 12))
+        ttk.Button(action_tab, text="导出 CSV 结果", style="Soft.TButton", command=self.export_csv).pack(fill="x", pady=(0, 12))
 
         ttk.Label(action_tab, text="当前信号", style="Section.TLabel").pack(anchor="w", pady=(8, 6))
-        tk.Label(action_tab, textvariable=self.signal_label_var, bg="#FCFAF5", fg="#4F5B63", justify="left", anchor="w", wraplength=320).pack(fill="x")
+        signal_card = ttk.Frame(action_tab, style="PanelAlt.TFrame", padding=10)
+        signal_card.pack(fill="x")
+        tk.Label(signal_card, textvariable=self.signal_label_var, bg=self.colors["panel_alt"], fg=self.colors["ink"], justify="left", anchor="w", wraplength=320).pack(fill="x")
 
         ttk.Label(action_tab, text="运行日志", style="Section.TLabel").pack(anchor="w", pady=(14, 6))
-        self.log_text = tk.Text(action_tab, height=14, bg="#fffdf8", fg="#24313A", relief="flat", font=("Consolas", 9), padx=8, pady=8)
+        self.log_text = tk.Text(action_tab, height=14, bg="#FBF7F0", fg=self.colors["ink"], relief="flat", font=("Consolas", 9), padx=10, pady=10, insertbackground=self.colors["accent"])
         self.log_text.pack(fill="both", expand=True)
         self.log("系统初始化完成。")
 
     def _build_right(self, parent: ttk.Frame) -> None:
-        top = ttk.Frame(parent, style="Panel.TFrame")
-        top.pack(fill="x")
-        tk.Label(top, text="主频", bg="#FCFAF5", fg="#6A747C").pack(side="left")
-        tk.Label(top, textvariable=self.summary_freq_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
-        tk.Label(top, text="主导速度", bg="#FCFAF5", fg="#6A747C").pack(side="left")
-        tk.Label(top, textvariable=self.summary_dominant_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
-        tk.Label(top, text="平均速度", bg="#FCFAF5", fg="#6A747C").pack(side="left")
-        tk.Label(top, textvariable=self.summary_average_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
-        tk.Label(top, text="最后一帧", bg="#FCFAF5", fg="#6A747C").pack(side="left")
-        tk.Label(top, textvariable=self.summary_last_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 0))
+        metrics = ttk.Frame(parent, style="Panel.TFrame")
+        metrics.pack(fill="x")
+        metrics.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self._metric_card(metrics, "主频", self.summary_freq_var, 0)
+        self._metric_card(metrics, "主导速度", self.summary_dominant_speed_var, 1)
+        self._metric_card(metrics, "平均速度", self.summary_average_speed_var, 2)
+        self._metric_card(metrics, "最后一帧", self.summary_last_speed_var, 3)
 
-        charts_frame = ttk.Frame(parent, style="Panel.TFrame")
-        charts_frame.pack(fill="both", expand=True, pady=(10, 10))
-        charts_frame.grid_columnconfigure(0, weight=1)
-        charts_frame.grid_rowconfigure(0, weight=1)
-        charts_frame.grid_rowconfigure(1, weight=1)
-        charts_frame.grid_rowconfigure(2, weight=1)
+        charts_shell = ttk.Frame(parent, style="Panel.TFrame")
+        charts_shell.pack(fill="both", expand=True, pady=(10, 10))
+        ttk.Label(charts_shell, text="分析视图", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        charts_notebook = ttk.Notebook(charts_shell, style="Nav.TNotebook")
+        charts_notebook.pack(fill="both", expand=True)
 
-        self.waveform_plot = PlotCanvas(charts_frame, "时域波形", "时间 / s", "幅值", "#C96A2A")
-        self.waveform_plot.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-        self.spectrum_plot = PlotCanvas(charts_frame, "频谱曲线", "频率 / Hz", "幅度 / dB", "#2A6F97")
-        self.spectrum_plot.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
-        self.speed_plot = PlotCanvas(charts_frame, "速度趋势", "时间 / s", "速度 / m/s", "#2F7D48")
-        self.speed_plot.grid(row=2, column=0, sticky="nsew")
+        waveform_tab = ttk.Frame(charts_notebook, style="Panel.TFrame", padding=8)
+        spectrum_tab = ttk.Frame(charts_notebook, style="Panel.TFrame", padding=8)
+        speed_tab = ttk.Frame(charts_notebook, style="Panel.TFrame", padding=8)
+        charts_notebook.add(waveform_tab, text="时域波形")
+        charts_notebook.add(spectrum_tab, text="频谱曲线")
+        charts_notebook.add(speed_tab, text="速度趋势")
+
+        self.waveform_plot = PlotCanvas(
+            waveform_tab,
+            "时域波形",
+            "时间 / s",
+            "幅值",
+            "#C76632",
+            background="#FBF7F0",
+            foreground=self.colors["ink"],
+            axis_color="#9B8F80",
+        )
+        self.waveform_plot.pack(fill="both", expand=True)
+        self.spectrum_plot = PlotCanvas(
+            spectrum_tab,
+            "频谱曲线",
+            "频率 / Hz",
+            "幅度 / dB",
+            "#2F6B7A",
+            background="#FBF7F0",
+            foreground=self.colors["ink"],
+            axis_color="#9B8F80",
+        )
+        self.spectrum_plot.pack(fill="both", expand=True)
+        self.speed_plot = PlotCanvas(
+            speed_tab,
+            "速度趋势",
+            "时间 / s",
+            "速度 / m/s",
+            "#547A38",
+            background="#FBF7F0",
+            foreground=self.colors["ink"],
+            axis_color="#9B8F80",
+        )
+        self.speed_plot.pack(fill="both", expand=True)
+        self._plots = [self.waveform_plot, self.spectrum_plot, self.speed_plot]
+        self._time_sync_plots = [self.waveform_plot, self.speed_plot]
+        for plot in self._time_sync_plots:
+            plot.on_view_changed = lambda ratio, source=plot: self._sync_views_from_plot(source, ratio)
 
         columns = ("time", "freq", "speed", "speed_kmh", "amplitude", "snr")
         table_frame = ttk.Frame(parent, style="Panel.TFrame")
         table_frame.pack(fill="both", expand=False)
         ttk.Label(table_frame, text="逐帧结果", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        tk.Label(
+            table_frame,
+            text="图表视图会同步带动结果表定位，支持横向滚动查看扩展字段。",
+            bg=self.colors["panel"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(0, 6))
         table_body = ttk.Frame(table_frame, style="Panel.TFrame")
         table_body.pack(fill="both", expand=False)
 
@@ -208,12 +299,43 @@ class DopplerApp(tk.Tk):
         self.result_table.pack(side="left", fill="both", expand=True)
         table_scrollbar.pack(side="right", fill="y")
         table_x_scrollbar.pack(fill="x", pady=(6, 0))
+        self.result_table.tag_configure("odd", background="#FBF7F0")
+        self.result_table.tag_configure("even", background="#F1E7D8")
+
+    def _sync_views_from_plot(self, source_plot: PlotCanvas, ratio: tuple[float, float]) -> None:
+        if self._syncing_views:
+            return
+        self._syncing_views = True
+        try:
+            start_ratio, end_ratio = ratio
+            for plot in self._time_sync_plots:
+                if plot is not source_plot:
+                    plot.set_view_ratio(start_ratio, end_ratio, notify=False)
+            self._sync_result_table(start_ratio, end_ratio)
+        finally:
+            self._syncing_views = False
+
+    def _sync_result_table(self, start_ratio: float, end_ratio: float) -> None:
+        if self._table_row_count <= 0:
+            return
+        visible_rows = max(1, int(self.result_table.cget("height")))
+        max_first_row = max(0, self._table_row_count - visible_rows)
+        target_first_row = int(round(start_ratio * max_first_row))
+        fraction = 0.0 if max_first_row == 0 else target_first_row / max_first_row
+        self.result_table.yview_moveto(float(np.clip(fraction, 0.0, 1.0)))
 
     def _add_entry(self, parent: ttk.Frame, label: str, variable: tk.StringVar) -> None:
         box = ttk.Frame(parent, style="Panel.TFrame")
         box.pack(fill="x", pady=(0, 8))
         ttk.Label(box, text=label).pack(anchor="w", pady=(0, 4))
-        ttk.Entry(box, textvariable=variable).pack(fill="x")
+        entry = ttk.Entry(box, textvariable=variable)
+        entry.pack(fill="x")
+
+    def _metric_card(self, parent: ttk.Frame, title: str, variable: tk.StringVar, column: int) -> None:
+        card = ttk.Frame(parent, style="PanelAlt.TFrame", padding=12)
+        card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+        tk.Label(card, text=title.upper(), bg=self.colors["panel_alt"], fg=self.colors["muted"], font=("Consolas", 8, "bold")).pack(anchor="w")
+        tk.Label(card, textvariable=variable, bg=self.colors["panel_alt"], fg=self.colors["accent_dark"], font=("Georgia", 16, "bold")).pack(anchor="w", pady=(10, 0))
 
     def _on_mode_changed(self, _: object) -> None:
         selected_label = self.mode_combo.get()
@@ -268,6 +390,7 @@ class DopplerApp(tk.Tk):
             self.signal_label_var.set(f"{Path(file_path).name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
             self._plot_signal_preview(self.current_signal)
             self.log(f"已读取信号文件: {file_path}")
+            self.status_var.set("已加载外部信号")
         except Exception as exc:
             messagebox.showerror("读取失败", str(exc))
 
@@ -282,6 +405,7 @@ class DopplerApp(tk.Tk):
             self.signal_label_var.set(f"{demo_file.name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
             self._plot_signal_preview(self.current_signal)
             self.log("已载入示例信号。")
+            self.status_var.set("已加载示例信号")
         except Exception as exc:
             messagebox.showerror("读取失败", str(exc))
 
@@ -302,6 +426,7 @@ class DopplerApp(tk.Tk):
             self.signal_label_var.set(f"{self.current_signal.source_name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
             self._plot_signal_preview(self.current_signal)
             self.log(f"已生成仿真信号，模式: {self.mode_combo.get()}")
+            self.status_var.set(f"仿真模式: {self.mode_combo.get()}")
         except Exception as exc:
             messagebox.showerror("生成失败", str(exc))
 
@@ -365,6 +490,7 @@ class DopplerApp(tk.Tk):
         self.analysis_in_progress = True
         self.analyze_button.configure(text="分析中...", state="disabled")
         self.log("开始执行测速分析。")
+        self.status_var.set("正在执行测速分析")
 
         def worker() -> None:
             try:
@@ -388,11 +514,13 @@ class DopplerApp(tk.Tk):
             self.summary_last_speed_var.set("--")
         self._render_result(result)
         self.log("分析完成。")
+        self.status_var.set("分析完成")
 
     def _finish_error(self, exc: Exception) -> None:
         self.analysis_in_progress = False
         self.analyze_button.configure(text="执行测速分析", state="normal")
         messagebox.showerror("分析失败", str(exc))
+        self.status_var.set("分析失败")
 
     def _plot_signal_preview(self, signal: SignalData) -> None:
         count = min(1200, signal.samples.size)
@@ -402,11 +530,14 @@ class DopplerApp(tk.Tk):
         idx = np.linspace(0, signal.samples.size - 1, count, dtype=int)
         self.waveform_plot.set_data(signal.time_axis_s[idx], signal.samples[idx])
         self.spectrum_plot.clear()
+        self.spectrum_plot.set_marker(None)
         self.speed_plot.clear()
+        self._table_row_count = 0
         for item in self.result_table.get_children():
             self.result_table.delete(item)
 
     def _render_result(self, result: AnalysisResult) -> None:
+        self._syncing_views = True
         spectrum_mask = (result.spectrum_frequency_hz >= result.config.min_frequency_hz) & (result.spectrum_frequency_hz <= result.config.max_frequency_hz)
         freq = result.spectrum_frequency_hz[spectrum_mask]
         mag = result.spectrum_magnitude_db[spectrum_mask]
@@ -415,6 +546,11 @@ class DopplerApp(tk.Tk):
             freq = freq[idx]
             mag = mag[idx]
         self.spectrum_plot.set_data(freq, mag)
+        self.spectrum_plot.set_marker(
+            result.summary.dominant_frequency_hz,
+            f"主峰 {result.summary.dominant_frequency_hz:.2f} Hz",
+            color=self.colors["accent_dark"],
+        )
 
         times = np.array([frame.timestamp_s for frame in result.frames], dtype=float)
         speeds = np.array([frame.filtered_speed_mps for frame in result.frames], dtype=float)
@@ -426,7 +562,7 @@ class DopplerApp(tk.Tk):
 
         for item in self.result_table.get_children():
             self.result_table.delete(item)
-        for frame in result.frames[:200]:
+        for index, frame in enumerate(result.frames):
             self.result_table.insert(
                 "",
                 "end",
@@ -438,7 +574,13 @@ class DopplerApp(tk.Tk):
                     f"{frame.amplitude:.4f}",
                     f"{frame.snr_db:.2f}",
                 ),
+                tags=("even" if index % 2 == 0 else "odd",),
             )
+        self._table_row_count = len(result.frames)
+        self._syncing_views = False
+        base_ratio = self.waveform_plot.get_view_ratio()
+        if base_ratio is not None:
+            self._sync_views_from_plot(self.waveform_plot, base_ratio)
 
     def export_csv(self) -> None:
         if self.current_result is None:

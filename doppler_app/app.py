@@ -1,0 +1,518 @@
+from __future__ import annotations
+
+import ctypes
+import threading
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import numpy as np
+
+from .models import AnalysisResult, ProcessingConfig, SignalData
+from .plotting import PlotCanvas
+from .processing import analyze_signal
+from .signal_io import generate_synthetic_signal, read_signal_file, save_analysis_csv
+
+
+MOTION_MODES = [
+    ("constant", "匀速"),
+    ("accelerate", "匀加速"),
+    ("decelerate", "匀减速"),
+    ("piecewise", "分段速度轨迹"),
+    ("curve", "自定义速度曲线"),
+]
+
+
+class DopplerApp(tk.Tk):
+    def __init__(self) -> None:
+        self._setup_dpi_awareness()
+        super().__init__()
+        self.title("运动目标多普勒测速软件")
+        self.geometry("1460x920")
+        self.minsize(1260, 780)
+        self.configure(bg="#F4F1EA")
+
+        self.current_signal: SignalData | None = None
+        self.current_result: AnalysisResult | None = None
+        self.project_root = Path(__file__).resolve().parent.parent
+        self.analysis_in_progress = False
+
+        self._build_style()
+        self._build_variables()
+        self._build_layout()
+        self._refresh_mode_fields()
+
+    def _setup_dpi_awareness(self) -> None:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+    def _build_style(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(".", background="#F4F1EA", foreground="#24313A", font=("Segoe UI", 10))
+        style.configure("Panel.TFrame", background="#FCFAF5")
+        style.configure("Header.TLabel", font=("Segoe UI Semibold", 12), background="#FCFAF5")
+        style.configure("Section.TLabel", font=("Segoe UI Semibold", 10), background="#FCFAF5", foreground="#4A5861")
+        style.configure("Data.Treeview", rowheight=28, font=("Segoe UI", 10))
+        style.configure("Data.Treeview.Heading", font=("Segoe UI Semibold", 10))
+        style.configure("Accent.TButton", background="#C96A2A", foreground="white", padding=(10, 7))
+        style.map("Accent.TButton", background=[("active", "#B45E24")])
+        style.configure("Nav.TNotebook", background="#FCFAF5", borderwidth=0)
+        style.configure("Nav.TNotebook.Tab", padding=(16, 8), font=("Segoe UI Semibold", 10))
+
+    def _build_variables(self) -> None:
+        self.sample_rate_var = tk.StringVar(value="24000")
+        self.carrier_freq_var = tk.StringVar(value="24.125")
+        self.frame_size_var = tk.StringVar(value="2048")
+        self.overlap_var = tk.StringVar(value="0.5")
+        self.min_freq_var = tk.StringVar(value="20")
+        self.max_freq_var = tk.StringVar(value="6000")
+
+        self.motion_mode_var = tk.StringVar(value="piecewise")
+        self.target_speed_var = tk.StringVar(value="12.0")
+        self.acceleration_var = tk.StringVar(value="0.8")
+        self.end_acceleration_var = tk.StringVar(value="1.5")
+        self.duration_var = tk.StringVar(value="4.0")
+        self.noise_var = tk.StringVar(value="0.18")
+        self.piecewise_segments_var = tk.StringVar(value="0.0,8.0;1.5,12.0;3.0,18.0;4.0,10.0")
+        self.curve_file_var = tk.StringVar(value="")
+
+        self.signal_label_var = tk.StringVar(value="未加载信号")
+        self.summary_dominant_speed_var = tk.StringVar(value="--")
+        self.summary_average_speed_var = tk.StringVar(value="--")
+        self.summary_last_speed_var = tk.StringVar(value="--")
+        self.summary_freq_var = tk.StringVar(value="--")
+
+    def _build_layout(self) -> None:
+        shell = ttk.Frame(self, padding=14)
+        shell.pack(fill="both", expand=True)
+
+        title_bar = ttk.Frame(shell, style="Panel.TFrame", padding=14)
+        title_bar.pack(fill="x", pady=(0, 12))
+        tk.Label(title_bar, text="运动目标多普勒测速软件", bg="#FCFAF5", fg="#24313A", font=("Segoe UI Semibold", 18)).pack(anchor="w")
+        tk.Label(title_bar, text="多工况仿真、频谱测频、速度计算与结果导出", bg="#FCFAF5", fg="#6A747C", font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
+
+        main = ttk.Panedwindow(shell, orient="horizontal")
+        main.pack(fill="both", expand=True)
+
+        left = ttk.Frame(main, style="Panel.TFrame", padding=12)
+        right = ttk.Frame(main, style="Panel.TFrame", padding=14)
+        main.add(left, weight=1)
+        main.add(right, weight=3)
+
+        self._build_left(left)
+        self._build_right(right)
+
+    def _build_left(self, parent: ttk.Frame) -> None:
+        notebook = ttk.Notebook(parent, style="Nav.TNotebook")
+        notebook.pack(fill="both", expand=True)
+
+        param_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+        sim_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+        action_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+
+        notebook.add(param_tab, text="处理参数")
+        notebook.add(sim_tab, text="仿真工况")
+        notebook.add(action_tab, text="操作导出")
+
+        ttk.Label(param_tab, text="采集与处理配置", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
+        for label, variable in [
+            ("采样率 (Hz)", self.sample_rate_var),
+            ("载频 (GHz)", self.carrier_freq_var),
+            ("帧长", self.frame_size_var),
+            ("重叠系数", self.overlap_var),
+            ("最小频率 (Hz)", self.min_freq_var),
+            ("最大频率 (Hz)", self.max_freq_var),
+            ("持续时间 (s)", self.duration_var),
+            ("噪声系数", self.noise_var),
+        ]:
+            self._add_entry(param_tab, label, variable)
+
+        ttk.Label(sim_tab, text="运动模型选择", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(sim_tab, text="运动模式", style="Section.TLabel").pack(anchor="w")
+        self.mode_combo = ttk.Combobox(sim_tab, values=[label for _, label in MOTION_MODES], state="readonly")
+        self.mode_combo.current(3)
+        self.mode_combo.pack(fill="x", pady=(6, 10))
+        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_changed)
+        self.mode_fields_frame = ttk.Frame(sim_tab, style="Panel.TFrame")
+        self.mode_fields_frame.pack(fill="x")
+
+        ttk.Label(action_tab, text="操作面板", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Button(action_tab, text="导入信号文件", style="Accent.TButton", command=self.load_signal_file).pack(fill="x", pady=(0, 8))
+        ttk.Button(action_tab, text="载入示例信号", command=self.load_demo_signal).pack(fill="x", pady=(0, 8))
+        ttk.Button(action_tab, text="生成仿真信号", command=self.generate_signal).pack(fill="x", pady=(0, 8))
+        self.analyze_button = ttk.Button(action_tab, text="执行测速分析", command=self.run_analysis)
+        self.analyze_button.pack(fill="x", pady=(0, 8))
+        ttk.Button(action_tab, text="导出 CSV 结果", command=self.export_csv).pack(fill="x", pady=(0, 12))
+
+        ttk.Label(action_tab, text="当前信号", style="Section.TLabel").pack(anchor="w", pady=(8, 6))
+        tk.Label(action_tab, textvariable=self.signal_label_var, bg="#FCFAF5", fg="#4F5B63", justify="left", anchor="w", wraplength=320).pack(fill="x")
+
+        ttk.Label(action_tab, text="运行日志", style="Section.TLabel").pack(anchor="w", pady=(14, 6))
+        self.log_text = tk.Text(action_tab, height=14, bg="#fffdf8", fg="#24313A", relief="flat", font=("Consolas", 9), padx=8, pady=8)
+        self.log_text.pack(fill="both", expand=True)
+        self.log("系统初始化完成。")
+
+    def _build_right(self, parent: ttk.Frame) -> None:
+        top = ttk.Frame(parent, style="Panel.TFrame")
+        top.pack(fill="x")
+        tk.Label(top, text="主频", bg="#FCFAF5", fg="#6A747C").pack(side="left")
+        tk.Label(top, textvariable=self.summary_freq_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
+        tk.Label(top, text="主导速度", bg="#FCFAF5", fg="#6A747C").pack(side="left")
+        tk.Label(top, textvariable=self.summary_dominant_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
+        tk.Label(top, text="平均速度", bg="#FCFAF5", fg="#6A747C").pack(side="left")
+        tk.Label(top, textvariable=self.summary_average_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 24))
+        tk.Label(top, text="最后一帧", bg="#FCFAF5", fg="#6A747C").pack(side="left")
+        tk.Label(top, textvariable=self.summary_last_speed_var, bg="#FCFAF5", fg="#C96A2A", font=("Consolas", 15, "bold")).pack(side="left", padx=(8, 0))
+
+        charts_frame = ttk.Frame(parent, style="Panel.TFrame")
+        charts_frame.pack(fill="both", expand=True, pady=(10, 10))
+        charts_frame.grid_columnconfigure(0, weight=1)
+        charts_frame.grid_rowconfigure(0, weight=1)
+        charts_frame.grid_rowconfigure(1, weight=1)
+        charts_frame.grid_rowconfigure(2, weight=1)
+
+        self.waveform_plot = PlotCanvas(charts_frame, "时域波形", "时间 / s", "幅值", "#C96A2A")
+        self.waveform_plot.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.spectrum_plot = PlotCanvas(charts_frame, "频谱曲线", "频率 / Hz", "幅度 / dB", "#2A6F97")
+        self.spectrum_plot.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        self.speed_plot = PlotCanvas(charts_frame, "速度趋势", "时间 / s", "速度 / m/s", "#2F7D48")
+        self.speed_plot.grid(row=2, column=0, sticky="nsew")
+
+        columns = ("time", "freq", "speed", "speed_kmh", "amplitude", "snr")
+        table_frame = ttk.Frame(parent, style="Panel.TFrame")
+        table_frame.pack(fill="both", expand=False)
+        ttk.Label(table_frame, text="逐帧结果", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        table_body = ttk.Frame(table_frame, style="Panel.TFrame")
+        table_body.pack(fill="both", expand=False)
+
+        self.result_table = ttk.Treeview(table_body, columns=columns, show="headings", height=10, style="Data.Treeview")
+        for col, text, width in [
+            ("time", "时间 (s)", 150),
+            ("freq", "频率 (Hz)", 180),
+            ("speed", "速度 (m/s)", 180),
+            ("speed_kmh", "速度 (km/h)", 180),
+            ("amplitude", "幅值", 150),
+            ("snr", "SNR (dB)", 150),
+        ]:
+            self.result_table.heading(col, text=text)
+            self.result_table.column(col, anchor="center", width=width, minwidth=width, stretch=False)
+        table_scrollbar = ttk.Scrollbar(table_body, orient="vertical", command=self.result_table.yview)
+        table_x_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.result_table.xview)
+        self.result_table.configure(yscrollcommand=table_scrollbar.set, xscrollcommand=table_x_scrollbar.set)
+        self.result_table.pack(side="left", fill="both", expand=True)
+        table_scrollbar.pack(side="right", fill="y")
+        table_x_scrollbar.pack(fill="x", pady=(6, 0))
+
+    def _add_entry(self, parent: ttk.Frame, label: str, variable: tk.StringVar) -> None:
+        box = ttk.Frame(parent, style="Panel.TFrame")
+        box.pack(fill="x", pady=(0, 8))
+        ttk.Label(box, text=label).pack(anchor="w", pady=(0, 4))
+        ttk.Entry(box, textvariable=variable).pack(fill="x")
+
+    def _on_mode_changed(self, _: object) -> None:
+        selected_label = self.mode_combo.get()
+        for value, label in MOTION_MODES:
+            if label == selected_label:
+                self.motion_mode_var.set(value)
+                break
+        self._refresh_mode_fields()
+
+    def _refresh_mode_fields(self) -> None:
+        for child in self.mode_fields_frame.winfo_children():
+            child.destroy()
+
+        mode = self.motion_mode_var.get()
+        if mode == "constant":
+            self._add_entry(self.mode_fields_frame, "匀速速度 (m/s)", self.target_speed_var)
+        elif mode == "accelerate":
+            self._add_entry(self.mode_fields_frame, "初始速度 (m/s)", self.target_speed_var)
+            self._add_entry(self.mode_fields_frame, "加速度 (m/s²)", self.acceleration_var)
+        elif mode == "decelerate":
+            self._add_entry(self.mode_fields_frame, "初始速度 (m/s)", self.target_speed_var)
+            self._add_entry(self.mode_fields_frame, "减速度 (m/s²)", self.acceleration_var)
+        elif mode == "piecewise":
+            self._add_entry(self.mode_fields_frame, "起始速度 (m/s)", self.target_speed_var)
+            self._add_entry(self.mode_fields_frame, "起始加速度 (m/s²)", self.acceleration_var)
+            self._add_entry(self.mode_fields_frame, "结束加速度 (m/s²)", self.end_acceleration_var)
+            box = ttk.Frame(self.mode_fields_frame, style="Panel.TFrame")
+            box.pack(fill="x", pady=(0, 8))
+            ttk.Label(box, text="分段速度点 time,speed").pack(anchor="w", pady=(0, 4))
+            ttk.Entry(box, textvariable=self.piecewise_segments_var).pack(fill="x")
+            ttk.Label(box, text="示例: 0.0,8.0;1.5,12.0;3.0,18.0;4.0,10.0", foreground="#6A747C").pack(anchor="w", pady=(4, 0))
+        elif mode == "curve":
+            box = ttk.Frame(self.mode_fields_frame, style="Panel.TFrame")
+            box.pack(fill="x", pady=(0, 8))
+            ttk.Label(box, text="速度曲线文件").pack(anchor="w", pady=(0, 4))
+            ttk.Entry(box, textvariable=self.curve_file_var).pack(fill="x")
+            ttk.Button(box, text="选择 CSV", command=self.pick_curve_file).pack(anchor="e", pady=(6, 0))
+            ttk.Label(box, text="CSV 两列: time_s,speed_mps", foreground="#6A747C").pack(anchor="w", pady=(4, 0))
+
+    def pick_curve_file(self) -> None:
+        file_path = filedialog.askopenfilename(title="选择速度曲线 CSV", filetypes=[("CSV", "*.csv *.txt"), ("All Files", "*.*")])
+        if file_path:
+            self.curve_file_var.set(file_path)
+
+    def load_signal_file(self) -> None:
+        file_path = filedialog.askopenfilename(title="选择待测速信号文件", filetypes=[("Signal Files", "*.csv *.txt *.wav"), ("All Files", "*.*")])
+        if not file_path:
+            return
+        try:
+            self.current_signal = read_signal_file(file_path, sample_rate_hint_hz=float(self.sample_rate_var.get()))
+            self.current_result = None
+            self.signal_label_var.set(f"{Path(file_path).name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
+            self._plot_signal_preview(self.current_signal)
+            self.log(f"已读取信号文件: {file_path}")
+        except Exception as exc:
+            messagebox.showerror("读取失败", str(exc))
+
+    def load_demo_signal(self) -> None:
+        demo_file = self.project_root / "samples" / "demo_signal.csv"
+        if not demo_file.exists():
+            messagebox.showwarning("缺少示例", "请先运行 generate_sample_data.py")
+            return
+        try:
+            self.current_signal = read_signal_file(demo_file)
+            self.current_result = None
+            self.signal_label_var.set(f"{demo_file.name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
+            self._plot_signal_preview(self.current_signal)
+            self.log("已载入示例信号。")
+        except Exception as exc:
+            messagebox.showerror("读取失败", str(exc))
+
+    def generate_signal(self) -> None:
+        try:
+            config = self._read_config()
+            duration_s = self._read_float(self.duration_var, "持续时间", minimum=0.1, maximum=600.0)
+            noise_level = self._read_float(self.noise_var, "噪声系数", minimum=0.0, maximum=5.0)
+            speed_profile = self._build_speed_profile(duration_s, config.sample_rate_hz)
+            self.current_signal = generate_synthetic_signal(
+                duration_s=duration_s,
+                config=config,
+                target_speed_mps=float(speed_profile[0]) if speed_profile is not None and speed_profile.size > 0 else 0.0,
+                speed_profile_mps=speed_profile,
+                noise_level=noise_level,
+            )
+            self.current_result = None
+            self.signal_label_var.set(f"{self.current_signal.source_name}\n采样率 {self.current_signal.sample_rate_hz:.1f} Hz\n时长 {self.current_signal.duration_s:.2f} s")
+            self._plot_signal_preview(self.current_signal)
+            self.log(f"已生成仿真信号，模式: {self.mode_combo.get()}")
+        except Exception as exc:
+            messagebox.showerror("生成失败", str(exc))
+
+    def _build_speed_profile(self, duration_s: float, sample_rate_hz: float) -> np.ndarray | None:
+        sample_count = max(1, int(duration_s * sample_rate_hz))
+        time_axis_s = np.arange(sample_count, dtype=float) / sample_rate_hz
+        mode = self.motion_mode_var.get()
+
+        if mode == "constant":
+            return np.full(sample_count, self._read_float(self.target_speed_var, "匀速速度"), dtype=float)
+        if mode == "accelerate":
+            return self._read_float(self.target_speed_var, "初始速度") + self._read_float(self.acceleration_var, "加速度") * time_axis_s
+        if mode == "decelerate":
+            return np.maximum(0.0, self._read_float(self.target_speed_var, "初始速度") - abs(self._read_float(self.acceleration_var, "减速度")) * time_axis_s)
+        if mode == "piecewise":
+            points = self._parse_piecewise_points()
+            times = np.array([item[0] for item in points], dtype=float)
+            speeds = np.array([item[1] for item in points], dtype=float)
+            return np.interp(time_axis_s, times, speeds, left=speeds[0], right=speeds[-1])
+        if mode == "curve":
+            curve_path = self.curve_file_var.get().strip()
+            if not curve_path:
+                raise ValueError("请先选择速度曲线 CSV 文件。")
+            curve_signal = read_signal_file(curve_path)
+            return np.interp(time_axis_s, curve_signal.time_axis_s, curve_signal.samples, left=curve_signal.samples[0], right=curve_signal.samples[-1])
+        return None
+
+    def _parse_piecewise_points(self) -> list[tuple[float, float]]:
+        raw = self.piecewise_segments_var.get().strip()
+        if not raw:
+            raise ValueError("请填写分段速度点。")
+        points: list[tuple[float, float]] = []
+        for chunk in raw.split(";"):
+            parts = [item.strip() for item in chunk.split(",")]
+            if len(parts) != 2:
+                raise ValueError("分段速度点格式应为 time,speed;time,speed")
+            points.append((float(parts[0]), float(parts[1])))
+        points.sort(key=lambda item: item[0])
+        if len(points) < 2:
+            raise ValueError("至少需要两个分段点。")
+        if points[0][0] < 0:
+            raise ValueError("分段时间不能为负数。")
+        for previous, current in zip(points, points[1:]):
+            if current[0] <= previous[0]:
+                raise ValueError("分段时间必须严格递增。")
+        return points
+
+    def run_analysis(self) -> None:
+        if self.current_signal is None:
+            messagebox.showwarning("缺少信号", "请先导入信号或生成仿真信号。")
+            return
+        if self.analysis_in_progress:
+            return
+        try:
+            config = self._read_config()
+            signal = self.current_signal
+        except Exception as exc:
+            messagebox.showerror("参数错误", str(exc))
+            return
+
+        self.analysis_in_progress = True
+        self.analyze_button.configure(text="分析中...", state="disabled")
+        self.log("开始执行测速分析。")
+
+        def worker() -> None:
+            try:
+                result = analyze_signal(signal, config)
+                self.after(0, lambda: self._finish_success(result))
+            except Exception as exc:
+                self.after(0, lambda: self._finish_error(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_success(self, result: AnalysisResult) -> None:
+        self.analysis_in_progress = False
+        self.analyze_button.configure(text="执行测速分析", state="normal")
+        self.current_result = result
+        self.summary_freq_var.set(f"{result.summary.dominant_frequency_hz:.2f} Hz")
+        self.summary_dominant_speed_var.set(f"{result.summary.dominant_speed_mps:.2f} m/s")
+        self.summary_average_speed_var.set(f"{result.summary.average_speed_mps:.2f} m/s")
+        if result.frames:
+            self.summary_last_speed_var.set(f"{result.frames[-1].filtered_speed_mps:.2f} m/s")
+        else:
+            self.summary_last_speed_var.set("--")
+        self._render_result(result)
+        self.log("分析完成。")
+
+    def _finish_error(self, exc: Exception) -> None:
+        self.analysis_in_progress = False
+        self.analyze_button.configure(text="执行测速分析", state="normal")
+        messagebox.showerror("分析失败", str(exc))
+
+    def _plot_signal_preview(self, signal: SignalData) -> None:
+        count = min(1200, signal.samples.size)
+        if count <= 0:
+            self.waveform_plot.clear()
+            return
+        idx = np.linspace(0, signal.samples.size - 1, count, dtype=int)
+        self.waveform_plot.set_data(signal.time_axis_s[idx], signal.samples[idx])
+        self.spectrum_plot.clear()
+        self.speed_plot.clear()
+        for item in self.result_table.get_children():
+            self.result_table.delete(item)
+
+    def _render_result(self, result: AnalysisResult) -> None:
+        spectrum_mask = (result.spectrum_frequency_hz >= result.config.min_frequency_hz) & (result.spectrum_frequency_hz <= result.config.max_frequency_hz)
+        freq = result.spectrum_frequency_hz[spectrum_mask]
+        mag = result.spectrum_magnitude_db[spectrum_mask]
+        if freq.size > 1200:
+            idx = np.linspace(0, freq.size - 1, 1200, dtype=int)
+            freq = freq[idx]
+            mag = mag[idx]
+        self.spectrum_plot.set_data(freq, mag)
+
+        times = np.array([frame.timestamp_s for frame in result.frames], dtype=float)
+        speeds = np.array([frame.filtered_speed_mps for frame in result.frames], dtype=float)
+        if times.size > 1200:
+            idx = np.linspace(0, times.size - 1, 1200, dtype=int)
+            times = times[idx]
+            speeds = speeds[idx]
+        self.speed_plot.set_data(times, speeds)
+
+        for item in self.result_table.get_children():
+            self.result_table.delete(item)
+        for frame in result.frames[:200]:
+            self.result_table.insert(
+                "",
+                "end",
+                values=(
+                    f"{frame.timestamp_s:.3f}",
+                    f"{frame.frequency_hz:.2f}",
+                    f"{frame.filtered_speed_mps:.2f}",
+                    f"{frame.filtered_speed_mps * 3.6:.2f}",
+                    f"{frame.amplitude:.4f}",
+                    f"{frame.snr_db:.2f}",
+                ),
+            )
+
+    def export_csv(self) -> None:
+        if self.current_result is None:
+            messagebox.showwarning("无分析结果", "请先执行测速分析。")
+            return
+        save_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")], initialfile="doppler_measurements.csv")
+        if not save_path:
+            return
+        save_analysis_csv(save_path, self.current_result.frames)
+        self.log(f"已导出: {save_path}")
+
+    def _read_config(self) -> ProcessingConfig:
+        sample_rate_hz = self._read_float(self.sample_rate_var, "采样率", minimum=100.0)
+        carrier_frequency_ghz = self._read_float(self.carrier_freq_var, "载频", minimum=0.001)
+        frame_size = self._read_int(self.frame_size_var, "帧长", minimum=256)
+        overlap_ratio = self._read_float(self.overlap_var, "重叠系数", minimum=0.0, maximum=0.95)
+        min_frequency_hz = self._read_float(self.min_freq_var, "最小频率", minimum=0.0)
+        max_frequency_hz = self._read_float(self.max_freq_var, "最大频率", minimum=1.0)
+        if max_frequency_hz <= min_frequency_hz:
+            raise ValueError("最大频率必须大于最小频率。")
+        return ProcessingConfig(
+            sample_rate_hz=sample_rate_hz,
+            carrier_frequency_hz=carrier_frequency_ghz * 1e9,
+            frame_size=frame_size,
+            overlap_ratio=overlap_ratio,
+            min_frequency_hz=min_frequency_hz,
+            max_frequency_hz=max_frequency_hz,
+        )
+
+    def log(self, text: str) -> None:
+        self.log_text.insert("end", text + "\n")
+        self.log_text.see("end")
+
+    def _read_float(
+        self,
+        variable: tk.StringVar,
+        field_name: str,
+        minimum: float | None = None,
+        maximum: float | None = None,
+    ) -> float:
+        raw = variable.get().strip()
+        if not raw:
+            raise ValueError(f"{field_name}不能为空。")
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{field_name}必须是数字。") from exc
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{field_name}不能小于 {minimum:g}。")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{field_name}不能大于 {maximum:g}。")
+        return value
+
+    def _read_int(
+        self,
+        variable: tk.StringVar,
+        field_name: str,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
+        raw = variable.get().strip()
+        if not raw:
+            raise ValueError(f"{field_name}不能为空。")
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{field_name}必须是整数。") from exc
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{field_name}不能小于 {minimum}。")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{field_name}不能大于 {maximum}。")
+        return value
+
+
+def main() -> None:
+    app = DopplerApp()
+    app.mainloop()
